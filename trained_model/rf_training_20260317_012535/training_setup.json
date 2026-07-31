@@ -1,0 +1,20 @@
+{
+  "created_at_text": "2026-03-17 01:25:35",
+  "dataset_paths": [
+    "dataset/Demox_20260317_012358/emg_data_Demox_20260317_012358.csv"
+  ],
+  "output_dir": "trained_model",
+  "run_name": "rf_training",
+  "window_ms": 20,
+  "stride_ms": 50,
+  "window_samples": 10,
+  "stride_samples": 25,
+  "n_estimators": 400,
+  "max_depth": 0,
+  "test_size": 0.2,
+  "random_seed": 42,
+  "class_weight_balanced": true,
+  "auto_load_model": false,
+  "sample_rate_hz": 500,
+  "input_channels": 8
+}

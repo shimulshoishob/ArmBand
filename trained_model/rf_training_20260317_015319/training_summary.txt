@@ -1,0 +1,8 @@
+Run Folder: trained_model/rf_training_20260317_015319
+Model File: trained_model/rf_training_20260317_015319/rf_realtime_model.joblib
+Datasets: 1 file(s)
+Accuracy: 0.8919
+Train windows: 591 | Test windows: 148
+Window: 200 ms (100 samples) | Stride: 50 ms (25 samples)
+Input channels: 8
+Classes: Left, Rest, Right, fist_close

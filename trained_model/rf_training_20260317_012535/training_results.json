@@ -1,0 +1,96 @@
+{
+  "created_at_text": "2026-03-17 01:25:35",
+  "accuracy": 0.21428571428571427,
+  "train_windows": 53,
+  "test_windows": 14,
+  "num_features": 156,
+  "classes": [
+    "Left",
+    "Rest",
+    "Right",
+    "fist_close"
+  ],
+  "class_window_counts": {
+    "Left": 12,
+    "Rest": 27,
+    "Right": 14,
+    "fist_close": 14
+  },
+  "segment_count_by_file": {
+    "dataset/Demox_20260317_012358/emg_data_Demox_20260317_012358.csv": 18
+  },
+  "channel_count_by_file": {
+    "dataset/Demox_20260317_012358/emg_data_Demox_20260317_012358.csv": 8
+  },
+  "input_channels": 8,
+  "skipped_channel_segments": 0,
+  "confusion_matrix": [
+    [
+      0,
+      2,
+      0,
+      0
+    ],
+    [
+      4,
+      2,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      1,
+      1
+    ],
+    [
+      0,
+      3,
+      0,
+      0
+    ]
+  ],
+  "classification_report_text": "              precision     recall   f1-score    support\n\n        Left     0.0000     0.0000     0.0000          2\n        Rest     0.2500     0.3333     0.2857          6\n       Right     1.0000     0.3333     0.5000          3\n  fist_close     0.0000     0.0000     0.0000          3\n\n    accuracy                           0.2143         14\n   macro avg     0.3125     0.1667     0.1964         14\nweighted avg     0.3214     0.2143     0.2296         14",
+  "classification_report_dict": {
+    "Left": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 2.0
+    },
+    "Rest": {
+      "precision": 0.25,
+      "recall": 0.3333333333333333,
+      "f1-score": 0.2857142857142857,
+      "support": 6.0
+    },
+    "Right": {
+      "precision": 1.0,
+      "recall": 0.3333333333333333,
+      "f1-score": 0.5,
+      "support": 3.0
+    },
+    "fist_close": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 3.0
+    },
+    "accuracy": 0.21428571428571427,
+    "macro avg": {
+      "precision": 0.3125,
+      "recall": 0.16666666666666666,
+      "f1-score": 0.19642857142857142,
+      "support": 14.0
+    },
+    "weighted avg": {
+      "precision": 0.32142857142857145,
+      "recall": 0.21428571428571427,
+      "f1-score": 0.22959183673469388,
+      "support": 14.0
+    }
+  },
+  "model_file": "rf_realtime_model.joblib",
+  "run_dir": "trained_model/rf_training_20260317_012535",
+  "model_path": "trained_model/rf_training_20260317_012535/rf_realtime_model.joblib"
+}

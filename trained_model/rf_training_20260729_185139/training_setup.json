@@ -1,0 +1,20 @@
+{
+  "created_at_text": "2026-07-29 18:51:39",
+  "dataset_paths": [
+    "dataset/Shimul_20260729_185044/emg_data_Shimul_20260729_185044.csv"
+  ],
+  "output_dir": "trained_model",
+  "run_name": "rf_training",
+  "window_ms": 200,
+  "stride_ms": 50,
+  "window_samples": 100,
+  "stride_samples": 25,
+  "n_estimators": 150,
+  "max_depth": 16,
+  "test_size": 0.2,
+  "random_seed": 42,
+  "class_weight_balanced": true,
+  "auto_load_model": true,
+  "sample_rate_hz": 500,
+  "input_channels": 11
+}

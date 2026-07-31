@@ -1,0 +1,96 @@
+{
+  "created_at_text": "2026-03-17 01:53:19",
+  "accuracy": 0.8918918918918919,
+  "train_windows": 591,
+  "test_windows": 148,
+  "num_features": 156,
+  "classes": [
+    "Left",
+    "Rest",
+    "Right",
+    "fist_close"
+  ],
+  "class_window_counts": {
+    "Left": 188,
+    "Rest": 297,
+    "Right": 127,
+    "fist_close": 127
+  },
+  "segment_count_by_file": {
+    "dataset/asdfsadfds_20260317_015249/emg_data_asdfsadfds_20260317_015249.csv": 18
+  },
+  "channel_count_by_file": {
+    "dataset/asdfsadfds_20260317_015249/emg_data_asdfsadfds_20260317_015249.csv": 8
+  },
+  "input_channels": 8,
+  "skipped_channel_segments": 0,
+  "confusion_matrix": [
+    [
+      32,
+      1,
+      0,
+      5
+    ],
+    [
+      1,
+      54,
+      5,
+      0
+    ],
+    [
+      0,
+      2,
+      23,
+      0
+    ],
+    [
+      1,
+      1,
+      0,
+      23
+    ]
+  ],
+  "classification_report_text": "              precision     recall   f1-score    support\n\n        Left     0.9412     0.8421     0.8889         38\n        Rest     0.9310     0.9000     0.9153         60\n       Right     0.8214     0.9200     0.8679         25\n  fist_close     0.8214     0.9200     0.8679         25\n\n    accuracy                           0.8919        148\n   macro avg     0.8788     0.8955     0.8850        148\nweighted avg     0.8966     0.8919     0.8925        148",
+  "classification_report_dict": {
+    "Left": {
+      "precision": 0.9411764705882353,
+      "recall": 0.8421052631578947,
+      "f1-score": 0.8888888888888888,
+      "support": 38.0
+    },
+    "Rest": {
+      "precision": 0.9310344827586207,
+      "recall": 0.9,
+      "f1-score": 0.9152542372881356,
+      "support": 60.0
+    },
+    "Right": {
+      "precision": 0.8214285714285714,
+      "recall": 0.92,
+      "f1-score": 0.8679245283018868,
+      "support": 25.0
+    },
+    "fist_close": {
+      "precision": 0.8214285714285714,
+      "recall": 0.92,
+      "f1-score": 0.8679245283018868,
+      "support": 25.0
+    },
+    "accuracy": 0.8918918918918919,
+    "macro avg": {
+      "precision": 0.8787670240509997,
+      "recall": 0.8955263157894736,
+      "f1-score": 0.8849980456951996,
+      "support": 148.0
+    },
+    "weighted avg": {
+      "precision": 0.8966094825628294,
+      "recall": 0.8918918918918919,
+      "f1-score": 0.8924949893929746,
+      "support": 148.0
+    }
+  },
+  "model_file": "rf_realtime_model.joblib",
+  "run_dir": "trained_model/rf_training_20260317_015319",
+  "model_path": "trained_model/rf_training_20260317_015319/rf_realtime_model.joblib"
+}

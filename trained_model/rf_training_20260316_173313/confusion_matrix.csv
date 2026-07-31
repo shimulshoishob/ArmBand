@@ -1,0 +1,5 @@
+actual/predicted,Left,Rest,Right,fist_close
+Left,1,3,0,0
+Rest,1,6,0,0
+Right,0,0,4,0
+fist_close,0,1,0,3

@@ -1,0 +1,10 @@
+              precision     recall   f1-score    support
+
+        Left     0.7143     1.0000     0.8333          5
+        Rest     0.8889     0.8889     0.8889          9
+       Right     1.0000     0.8000     0.8889          5
+  fist_close     0.8000     0.6667     0.7273          6
+
+    accuracy                           0.8400         25
+   macro avg     0.8508     0.8389     0.8346         25
+weighted avg     0.8549     0.8400     0.8390         25

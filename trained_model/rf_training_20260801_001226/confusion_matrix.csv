@@ -1,0 +1,7 @@
+actual/predicted,Fist_Close,Left,Move_Down,Move_up,Rest,Right
+Fist_Close,32,0,0,0,2,0
+Left,0,27,0,0,5,0
+Move_Down,0,0,29,0,5,0
+Move_up,0,0,0,30,4,0
+Rest,1,2,1,0,105,1
+Right,0,0,0,0,2,32
