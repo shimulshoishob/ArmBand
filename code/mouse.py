@@ -1,6 +1,9 @@
 import sys
 import os
 import time
+import csv  # [FITTS ADDED]
+import math  # [FITTS ADDED]
+import random  # [FITTS ADDED]
 import socket
 import struct
 import hashlib
@@ -33,8 +36,8 @@ from PyQt5.QtWidgets import (
     QGroupBox, QSpinBox, QDoubleSpinBox, QScrollArea, QDialog, QTabWidget, QRadioButton,
     QButtonGroup, QStackedWidget, QSlider
 )
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
-from PyQt5.QtGui import QFont, QColor, QIcon
+from PyQt5.QtCore import QObject, QPoint, QThread, pyqtSignal, QTimer, Qt  # [FITTS ADDED]
+from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
 from app_theme import apply_dark_theme as apply_app_theme, themed_button_style, themed_label_style
 
 # Try to import feature extraction from BioWave
@@ -819,14 +822,355 @@ class InferenceWorker(QThread):
         self.wait()
 
 
+# [FITTS ADDED] ISO 9241-9 / Fitts' Law trial and block metrics collector.
+class FittsMetricsCollector(QObject):
+    """Collects cursor-path and throughput metrics without controlling the mouse."""
+
+    trial_completed = pyqtSignal()
+
+    def __init__(self, system_name="old_emg", block_size=20, parent=None):
+        super().__init__(parent)
+        self.system_name = str(system_name)
+        self.participant_id = "participant_01"
+        self.block_size = max(1, int(block_size))
+        self.trial_id = 0
+        self.block_id = 1
+        self.block_trials = []
+        self.all_blocks = []
+        self.all_trials = []
+        self._reset_trial_state()
+
+    def _reset_trial_state(self):
+        self.target_x = None
+        self.target_y = None
+        self.target_width = None
+        self.distance = 0.0
+        self.trial_start_time = None
+        self.time_to_first_move = None
+        self.first_move_recorded = False
+        self.cursor_positions = []
+        self.cursor_start_pos = None
+        self.re_entry_count = 0
+        self.inside_target = False
+        self._has_entered_target = False
+        self.reversal_count_x = 0
+        self.reversal_count_y = 0
+        self.last_dx = 0.0
+        self.last_dy = 0.0
+        self.click_correct = False
+        self.click_error = False
+        self.wrong_click = False
+        self.spurious_click = False
+
+    def _in_trial(self):
+        return self.trial_start_time is not None
+
+    def _point_in_target(self, x, y):
+        if self.target_x is None or self.target_width is None:
+            return False
+        radius = self.target_width / 2.0
+        return ((x - self.target_x) ** 2 + (y - self.target_y) ** 2) <= radius ** 2
+
+    def start_trial(self, target_x, target_y, target_width, cursor_x, cursor_y):
+        """Start a new target acquisition trial from the current cursor position."""
+        if self._in_trial():
+            self._end_trial()
+        self._reset_trial_state()
+        self.trial_id += 1
+        self.target_x = float(target_x)
+        self.target_y = float(target_y)
+        self.target_width = max(1.0, float(target_width))
+        self.cursor_start_pos = (float(cursor_x), float(cursor_y))
+        self.distance = math.hypot(self.target_x - cursor_x, self.target_y - cursor_y)
+        self.trial_start_time = time.perf_counter()
+        self.inside_target = self._point_in_target(cursor_x, cursor_y)
+        self._has_entered_target = self.inside_target
+        self.cursor_positions.append((float(cursor_x), float(cursor_y), self.trial_start_time))
+
+    def record_cursor(self, x, y, timestamp):
+        """Record one cursor sample and derive movement, re-entry, and reversals."""
+        if not self._in_trial():
+            return
+        x, y, timestamp = float(x), float(y), float(timestamp)
+        previous_x, previous_y, _ = self.cursor_positions[-1]
+        dx, dy = x - previous_x, y - previous_y
+        if not self.first_move_recorded and math.hypot(x - self.cursor_start_pos[0], y - self.cursor_start_pos[1]) > 2.0:
+            self.time_to_first_move = max(0.0, timestamp - self.trial_start_time)
+            self.first_move_recorded = True
+        if dx and self.last_dx and dx * self.last_dx < 0:
+            self.reversal_count_x += 1
+        if dy and self.last_dy and dy * self.last_dy < 0:
+            self.reversal_count_y += 1
+        if dx:
+            self.last_dx = dx
+        if dy:
+            self.last_dy = dy
+        is_inside = self._point_in_target(x, y)
+        if is_inside and not self.inside_target and self._has_entered_target:
+            self.re_entry_count += 1
+        if is_inside:
+            self._has_entered_target = True
+        self.inside_target = is_inside
+        self.cursor_positions.append((x, y, timestamp))
+
+    def record_click(self, x, y, inside_target, spurious=False):
+        """Record a click and complete the active trial, including click errors."""
+        if not self._in_trial():
+            return
+        self.record_cursor(x, y, time.perf_counter())
+        self.spurious_click = bool(spurious)
+        self.wrong_click = not bool(inside_target) and not self.spurious_click
+        self.click_correct = bool(inside_target) and not self.spurious_click
+        self.click_error = self.wrong_click or self.spurious_click
+        self._end_trial()
+
+    def _end_trial(self):
+        if not self._in_trial():
+            return
+        end_time = time.perf_counter()
+        movement_time = max(0.0001, end_time - self.trial_start_time)
+        coords = self.cursor_positions
+        if len(coords) >= 2:
+            sdx = float(np.std([position[0] for position in coords]))
+        else:
+            sdx = self.target_width / 4.0
+        if sdx <= 0:
+            sdx = self.target_width / 4.0
+        effective_width = max(0.0001, 4.133 * sdx)
+        nominal_id = math.log2(self.distance / self.target_width + 1.0)
+        effective_id = math.log2(self.distance / effective_width + 1.0)
+        throughput = effective_id / movement_time
+        path_length = sum(
+            math.hypot(coords[index][0] - coords[index - 1][0], coords[index][1] - coords[index - 1][1])
+            for index in range(1, len(coords))
+        )
+        path_length = max(1.0, path_length)
+        path_efficiency = min(1.0, max(0.0, self.distance / path_length))
+        endpoint_x, endpoint_y, _ = coords[-1]
+        if self.distance > 0:
+            axis_x = (self.target_x - self.cursor_start_pos[0]) / self.distance
+            axis_y = (self.target_y - self.cursor_start_pos[1]) / self.distance
+            axis_error = (endpoint_x - self.target_x) * axis_x + (endpoint_y - self.target_y) * axis_y
+        else:
+            axis_error = 0.0
+        trial = {
+            "system": self.system_name,
+            "block_id": self.block_id,
+            "trial_id": self.trial_id,
+            "MT": movement_time,
+            "D": self.distance,
+            "W": self.target_width,
+            "ID": nominal_id,
+            "De": self.distance,
+            "We": effective_width,
+            "IDe": effective_id,
+            "TP": throughput,
+            "path_efficiency": path_efficiency,
+            "re_entry_count": self.re_entry_count,
+            "reversal_count_x": self.reversal_count_x,
+            "reversal_count_y": self.reversal_count_y,
+            "time_to_first_move": self.time_to_first_move,
+            "click_correct": self.click_correct,
+            "click_error": self.click_error,
+            "wrong_click": self.wrong_click,
+            "spurious_click": self.spurious_click,
+            "participant_id": self.participant_id,
+            "_axis_error": axis_error,
+        }
+        self.block_trials.append(trial)
+        self.all_trials.append(trial)
+        self.trial_start_time = None
+        if len(self.block_trials) >= self.block_size:
+            self._end_block()
+        self.trial_completed.emit()
+
+    def _end_block(self):
+        if not self.block_trials:
+            return
+        trials = self.block_trials
+        # ISO effective width uses endpoint scatter along the movement axis.
+        # Repeated targets of the same nominal width provide that scatter.
+        width_groups = {}
+        for trial in trials:
+            width_groups.setdefault(trial["W"], []).append(trial)
+        for width, group in width_groups.items():
+            errors = [trial["_axis_error"] for trial in group]
+            sdx = float(np.std(errors)) if len(errors) >= 2 else width / 4.0
+            if sdx <= 0:
+                sdx = width / 4.0
+            effective_width = max(0.0001, 4.133 * sdx)
+            effective_distance = max(0.0001, float(np.mean([
+                trial["D"] + trial["_axis_error"] for trial in group
+            ])))
+            effective_id = math.log2(effective_distance / effective_width + 1.0)
+            for trial in group:
+                trial["We"] = effective_width
+                trial["De"] = effective_distance
+                trial["IDe"] = effective_id
+                trial["TP"] = effective_id / max(0.0001, trial["MT"])
+        throughput_values = [trial["TP"] for trial in trials]
+        summary = {
+            "block_id": self.block_id,
+            "participant_id": self.participant_id,
+            "system": self.system_name,
+            "mean_TP": float(np.mean(throughput_values)),
+            "std_TP": float(np.std(throughput_values)),
+            "error_rate": float(np.mean([trial["click_error"] for trial in trials])),
+            "wrong_click_rate": float(np.mean([trial["wrong_click"] for trial in trials])),
+            "spurious_click_rate": float(np.mean([trial["spurious_click"] for trial in trials])),
+            "mean_path_efficiency": float(np.mean([trial["path_efficiency"] for trial in trials])),
+            "mean_re_entry": float(np.mean([trial["re_entry_count"] for trial in trials])),
+            "mean_reversals": float(np.mean([
+                trial["reversal_count_x"] + trial["reversal_count_y"] for trial in trials
+            ])),
+        }
+        self.all_blocks.append(summary)
+        self.block_trials = []
+        self.block_id += 1
+
+    # [FITTS ADDED] Start a clean block when a guided multi-target test begins.
+    def start_fresh_block(self):
+        if self.block_trials:
+            self.block_trials = []
+            self.block_id += 1
+
+    def save_csv(self, path):
+        """Save all complete trials, flushing after each row for crash resilience."""
+        columns = [
+            "participant_id", "system", "block_id", "trial_id", "MT", "D", "W", "ID", "De", "We", "IDe", "TP",
+            "path_efficiency", "re_entry_count", "reversal_count_x", "reversal_count_y",
+            "time_to_first_move", "click_correct", "click_error", "wrong_click", "spurious_click",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=columns)
+            writer.writeheader()
+            for trial in self.all_trials:
+                row = {}
+                for column in columns:
+                    value = trial[column]
+                    row[column] = round(value, 4) if isinstance(value, float) else value
+                writer.writerow(row)
+                file_obj.flush()
+        stem, extension = os.path.splitext(path)
+        summary_path = f"{stem}_block_summary{extension or '.csv'}"
+        summary_columns = [
+            "participant_id", "system", "block_id", "mean_TP", "std_TP", "error_rate",
+            "wrong_click_rate", "spurious_click_rate", "mean_path_efficiency", "mean_re_entry", "mean_reversals",
+        ]
+        with open(summary_path, "w", newline="", encoding="utf-8") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=summary_columns)
+            writer.writeheader()
+            for summary in self.all_blocks:
+                writer.writerow({key: round(value, 4) if isinstance(value, float) else value for key, value in summary.items()})
+                file_obj.flush()
+        regression_path = f"{stem}_regression{extension or '.csv'}"
+        conditions = {(trial["participant_id"], trial["system"]) for trial in self.all_trials}
+        with open(regression_path, "w", newline="", encoding="utf-8") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=["participant_id", "system", "intercept_s", "slope_s_per_bit", "r_squared", "n"])
+            writer.writeheader()
+            for participant_id, system_name in sorted(conditions):
+                regression = self.regression_summary(system_name, participant_id)
+                if regression:
+                    writer.writerow({
+                        "participant_id": participant_id,
+                        "system": system_name,
+                        **{key: round(value, 4) if isinstance(value, float) else value for key, value in regression.items()},
+                    })
+                    file_obj.flush()
+
+    def regression_summary(self, system_name=None, participant_id=None):
+        """Fit MT = a + b × ID for one participant and one test condition."""
+        trials = [
+            trial for trial in self.all_trials
+            if (system_name is None or trial["system"] == system_name)
+            and (participant_id is None or trial["participant_id"] == participant_id)
+        ]
+        if len(trials) < 2 or len({trial["ID"] for trial in trials}) < 2:
+            return None
+        ids = np.asarray([trial["ID"] for trial in trials], dtype=float)
+        movement_times = np.asarray([trial["MT"] for trial in trials], dtype=float)
+        slope, intercept = np.polyfit(ids, movement_times, 1)
+        predicted = intercept + slope * ids
+        total = float(np.sum((movement_times - np.mean(movement_times)) ** 2))
+        r_squared = 1.0 if total == 0 else float(1.0 - np.sum((movement_times - predicted) ** 2) / total)
+        return {"intercept_s": float(intercept), "slope_s_per_bit": float(slope), "r_squared": r_squared, "n": len(trials)}
+
+    def block_summary_text(self):
+        if not self.all_blocks:
+            return ""
+        summary = self.all_blocks[-1]
+        return (
+            f"Block {summary['block_id']}: TP {summary['mean_TP']:.2f} ± {summary['std_TP']:.2f} bits/s | "
+            f"Errors {summary['error_rate'] * 100:.1f}% "
+            f"(wrong {summary['wrong_click_rate'] * 100:.1f}%, spurious {summary['spurious_click_rate'] * 100:.1f}%) | "
+            f"Path efficiency {summary['mean_path_efficiency'] * 100:.1f}%"
+        )
+
+
+# [FITTS ADDED] Full-screen visual target used for guided Fitts trials.
+class FittsTargetOverlay(QDialog):
+    cursor_sampled = pyqtSignal(int, int, float)
+    target_clicked = pyqtSignal(int, int, bool)
+
+    def __init__(self, target_x, target_y, target_width, parent=None, circle_targets=None):
+        super().__init__(parent)
+        self.target_x = int(target_x)
+        self.target_y = int(target_y)
+        self.target_width = int(target_width)
+        self.circle_targets = circle_targets or []
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CrossCursor)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#07101D"))
+        painter.setPen(QPen(QColor("#475569"), 2))
+        painter.setBrush(QBrush(QColor(71, 85, 105, 45)))
+        for x, y, width in self.circle_targets:
+            local_x, local_y = x - self.geometry().x(), y - self.geometry().y()
+            radius = width / 2.0
+            painter.drawEllipse(int(local_x - radius), int(local_y - radius), int(width), int(width))
+        local_x = self.target_x - self.geometry().x()
+        local_y = self.target_y - self.geometry().y()
+        radius = self.target_width / 2.0
+        painter.setPen(QPen(QColor("#E879F9"), 4))
+        painter.setBrush(QBrush(QColor(34, 211, 238, 95)))
+        painter.drawEllipse(int(local_x - radius), int(local_y - radius), int(self.target_width), int(self.target_width))
+        painter.setPen(QPen(QColor("#F8FAFC"), 2))
+        painter.drawLine(int(local_x - radius - 16), int(local_y), int(local_x + radius + 16), int(local_y))
+        painter.drawLine(int(local_x), int(local_y - radius - 16), int(local_x), int(local_y + radius + 16))
+        painter.setPen(QColor("#67E8F9"))
+        painter.setFont(QFont("Helvetica Neue", 18, QFont.Bold))
+        painter.drawText(36, 46, "FITTS' LAW TARGET ACQUISITION")
+        painter.setFont(QFont("Helvetica Neue", 14))
+        painter.drawText(36, 72, "Move to the glowing target and click it. Press Esc to cancel this trial.")
+
+    def mouseMoveEvent(self, event):
+        point = event.globalPos()
+        self.cursor_sampled.emit(point.x(), point.y(), time.perf_counter())
+
+    def mousePressEvent(self, event):
+        point = event.globalPos()
+        is_inside = ((point.x() - self.target_x) ** 2 + (point.y() - self.target_y) ** 2) <= (self.target_width / 2.0) ** 2
+        self.target_clicked.emit(point.x(), point.y(), is_inside)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
+
 # --- MAIN APPLICATION UI ---
 
 class MouseControllerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BioWave - Adaptive Mouse Controller")
-        self.resize(580, 820)
-        self.setMinimumSize(520, 640)
+        self.resize(820, 920)
+        self.setMinimumSize(700, 720)
         
         if not HAS_RF:
             QMessageBox.critical(self, "Missing File", "rf_features.py must be in the same folder!")
@@ -839,6 +1183,7 @@ class MouseControllerApp(QMainWindow):
         self.is_connected = False
         self.model_loaded = False
         self.mouse_control_active = False
+        self._screen_fitted_once = False
         
         # Wireless state
         self.discovered_devices = []
@@ -863,6 +1208,15 @@ class MouseControllerApp(QMainWindow):
         self.current_active_action = "Ignore"
         self.current_active_conf = 0.0
 
+        # [FITTS ADDED] ISO 9241-9 trial state is independent of mouse control.
+        self.fitts = FittsMetricsCollector(system_name="old_emg", block_size=20)
+        self.fitts_active = False
+        self.fitts_csv_path = "fitts_log.csv"
+        self.fitts_target_overlay = None
+        self.fitts_sequence_widths = []
+        self.fitts_sequence_targets = []
+        self.fitts_sequence_active = False
+
         # Sub-pixel accumulator & continuous analog velocity states
         self.curr_vx = 0.0
         self.curr_vy = 0.0
@@ -881,6 +1235,8 @@ class MouseControllerApp(QMainWindow):
         self.mouse_backend = MouseBackend()
 
         self.init_ui()
+        # [FITTS ADDED] Refresh the metrics panel when a click completes a trial.
+        self.fitts.trial_completed.connect(self._on_fitts_trial_complete)
         
         self.inference_worker = InferenceWorker(self.sample_rate)
         self.inference_worker.prediction_ready.connect(self.on_prediction_ready)
@@ -888,6 +1244,16 @@ class MouseControllerApp(QMainWindow):
 
     def init_ui(self):
         central = QWidget()
+        central.setObjectName("mouseControllerRoot")
+        central.setStyleSheet(
+            "QWidget#mouseControllerRoot QLabel { font-size: 16px; } "
+            "QWidget#mouseControllerRoot QLineEdit, QWidget#mouseControllerRoot QComboBox, "
+            "QWidget#mouseControllerRoot QSpinBox, QWidget#mouseControllerRoot QDoubleSpinBox { "
+            "font-size: 16px; min-height: 30px; } "
+            "QWidget#mouseControllerRoot QPushButton { font-size: 15px; min-height: 30px; } "
+            "QWidget#mouseControllerRoot QGroupBox { font-size: 17px; } "
+            "QWidget#mouseControllerRoot QLabel#mousePrediction { font-size: 32px; }"
+        )
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(18, 16, 18, 18)
@@ -906,7 +1272,7 @@ class MouseControllerApp(QMainWindow):
         title = QLabel("BIOWAVE  /  MOUSE CONTROL")
         title.setStyleSheet("font-size: 18px; font-weight: 800; letter-spacing: 1px; color: #F8FAFC;")
         subtitle = QLabel("EMG-DRIVEN CURSOR INTERFACE")
-        subtitle.setStyleSheet("font-size: 10px; font-weight: 700; letter-spacing: 1px; color: #67E8F9;")
+        subtitle.setStyleSheet("font-size: 12px; font-weight: 700; letter-spacing: 1px; color: #67E8F9;")
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)
         layout.addWidget(header)
@@ -1053,6 +1419,7 @@ class MouseControllerApp(QMainWindow):
         layout.addWidget(self.lbl_status)
 
         self.lbl_prediction = QLabel("REST")
+        self.lbl_prediction.setObjectName("mousePrediction")
         self.lbl_prediction.setAlignment(Qt.AlignCenter)
         self.lbl_prediction.setFont(QFont("Arial", 28, QFont.Bold))
         self.lbl_prediction.setStyleSheet("color: #6F8A99;")
@@ -1069,10 +1436,92 @@ class MouseControllerApp(QMainWindow):
         self.btn_mouse_toggle.toggled.connect(self.toggle_mouse_control)
         layout.addWidget(self.btn_mouse_toggle)
         
-        lbl_safety = QLabel("<b>Safety Feature:</b> Move physical mouse to screen corner to abort!")
-        lbl_safety.setAlignment(Qt.AlignCenter)
-        lbl_safety.setStyleSheet("color: #FB7185; font-size: 11px;")
-        layout.addWidget(lbl_safety)
+        self.lbl_safety = QLabel("<b>Safety Feature:</b> Move physical mouse to screen corner to abort!")
+        self.lbl_safety.setAlignment(Qt.AlignCenter)
+        self.lbl_safety.setStyleSheet("color: #FB7185; font-size: 13px;")
+        layout.addWidget(self.lbl_safety)
+
+        # [FITTS ADDED] Collapsible ISO 9241-9 metrics controls.
+        self.grp_fitts = QGroupBox("Fitts Metrics • Performance Test")
+        fitts_layout = QVBoxLayout(self.grp_fitts)
+        self.fitts_content = QWidget()
+        fitts_form = QFormLayout(self.fitts_content)
+        fitts_help = QLabel(
+            "How to use this panel:\n"
+            "1. Choose the system you are testing.\n"
+            "2. Start a trial and enter the target position.\n"
+            "3. Move to the target and perform the mapped click.\n"
+            "4. The result is saved automatically."
+        )
+        fitts_help.setWordWrap(True)
+        fitts_help.setStyleSheet("color: #67E8F9; font-size: 15px; padding: 6px;")
+        fitts_layout.addWidget(fitts_help)
+        # [FITTS ADDED] Keep participant-level results separate for valid reporting.
+        self.txt_fitts_participant = QLineEdit("participant_01")
+        self.txt_fitts_participant.setPlaceholderText("e.g. P01")
+        fitts_form.addRow("Participant ID:", self.txt_fitts_participant)
+        # [FITTS ADDED] Label each evaluation condition in the exported CSV.
+        self.combo_fitts_system = QComboBox()
+        self.combo_fitts_system.addItem("Normal Mouse", "normal_mouse")
+        self.combo_fitts_system.addItem("Old EMG Device", "old_emg")
+        self.combo_fitts_system.addItem("New EMG Device", "new_emg")
+        self.combo_fitts_system.setCurrentIndex(1)
+        fitts_form.addRow("Test System:", self.combo_fitts_system)
+        fitts_path_row = QHBoxLayout()
+        self.txt_fitts_path = QLineEdit(self.fitts_csv_path)
+        self.txt_fitts_path.setReadOnly(True)
+        fitts_path_row.addWidget(self.txt_fitts_path)
+        btn_fitts_browse = QPushButton("Browse")
+        btn_fitts_browse.clicked.connect(self._choose_fitts_csv_path)
+        fitts_path_row.addWidget(btn_fitts_browse)
+        fitts_form.addRow("CSV Log:", fitts_path_row)
+        self.lbl_fitts_status = QLabel("No trials yet.")
+        self.lbl_fitts_status.setWordWrap(True)
+        self.lbl_fitts_status.setStyleSheet(themed_label_style("muted"))
+        fitts_form.addRow("Status:", self.lbl_fitts_status)
+        fitts_buttons = QHBoxLayout()
+        btn_fitts_start = QPushButton("Start Test Trial")
+        btn_fitts_start.setStyleSheet(themed_button_style("accent"))
+        btn_fitts_start.clicked.connect(self._open_fitts_trial_dialog)
+        fitts_buttons.addWidget(btn_fitts_start)
+        btn_fitts_block = QPushButton("Start Full Test (20 Targets)")
+        btn_fitts_block.setStyleSheet(themed_button_style("success"))
+        btn_fitts_block.clicked.connect(self.start_visual_fitts_block)
+        fitts_buttons.addWidget(btn_fitts_block)
+        btn_fitts_save = QPushButton("Save Fitts Log")
+        btn_fitts_save.setStyleSheet(themed_button_style("muted"))
+        btn_fitts_save.clicked.connect(self.save_fitts_log)
+        fitts_buttons.addWidget(btn_fitts_save)
+        fitts_form.addRow(fitts_buttons)
+        fitts_layout.addWidget(self.fitts_content)
+        layout.addWidget(self.grp_fitts)
+
+        # Keep the main EMG controls on the left and explanations/metrics on
+        # the right, where the Fitts text has enough width to remain readable.
+        for widget in (
+            grp_setup, grp_map, grp_settings, self.lbl_status, self.lbl_prediction,
+            self.lbl_conf, self.btn_mouse_toggle, self.lbl_safety, self.grp_fitts,
+        ):
+            layout.removeWidget(widget)
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+        left_layout.addWidget(grp_setup)
+        left_layout.addWidget(grp_map, 1)
+        left_layout.addWidget(grp_settings)
+        left_layout.addWidget(self.lbl_status)
+        left_layout.addWidget(self.lbl_prediction)
+        left_layout.addWidget(self.lbl_conf)
+        left_layout.addWidget(self.btn_mouse_toggle)
+        left_layout.addWidget(self.lbl_safety)
+        self.grp_fitts.setMinimumWidth(370)
+        self.grp_fitts.setMaximumWidth(500)
+        content_row = QHBoxLayout()
+        content_row.setSpacing(16)
+        content_row.addWidget(left_column, 3)
+        content_row.addWidget(self.grp_fitts, 2)
+        layout.addLayout(content_row, 1)
 
         if not HAS_MOUSE_CONTROL:
             QMessageBox.warning(
@@ -1080,6 +1529,215 @@ class MouseControllerApp(QMainWindow):
                 "Missing Mouse Library",
                 "Install pyautogui for mouse control. On macOS, installing pyobjc also enables the faster native cursor path.",
             )
+
+    # [FITTS ADDED] Choose a persistent CSV location for ISO metrics.
+    def _choose_fitts_csv_path(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Fitts Metrics", self.fitts_csv_path, "CSV Files (*.csv)")
+        if path:
+            self.fitts_csv_path = path
+            self.txt_fitts_path.setText(path)
+
+    # [FITTS ADDED] Offer a visual target by default, with manual coordinates for external harnesses.
+    def _open_fitts_trial_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Start Fitts Test Trial")
+        form = QFormLayout(dialog)
+        intro = QLabel(
+            "Recommended: start a visual target. A full-screen glowing circle will appear. "
+            "Move the pointer into it and click to finish the trial. For a full comparison, "
+            "use Start Full Test (20 Targets) in the right panel."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #67E8F9; font-size: 15px; padding: 6px;")
+        form.addRow(intro)
+        spin_x, spin_y, spin_width = QSpinBox(), QSpinBox(), QSpinBox()
+        for spin in (spin_x, spin_y):
+            spin.setRange(-10000, 10000)
+            spin.setValue(500)
+        spin_width.setRange(1, 5000)
+        spin_width.setValue(80)
+        form.addRow("Manual Target X:", spin_x)
+        form.addRow("Manual Target Y:", spin_y)
+        form.addRow("Target Diameter:", spin_width)
+        buttons = QHBoxLayout()
+        visual_button = QPushButton("Start Visual Target")
+        start_button = QPushButton("Start Manual Trial")
+        cancel_button = QPushButton("Cancel")
+        visual_button.setStyleSheet(themed_button_style("success"))
+        start_button.setStyleSheet(themed_button_style("accent"))
+        cancel_button.setStyleSheet(themed_button_style("muted"))
+        visual_button.clicked.connect(lambda: (self.start_visual_fitts_trial(spin_width.value()), dialog.accept()))
+        start_button.clicked.connect(lambda: (self.start_fitts_trial(spin_x.value(), spin_y.value(), spin_width.value()), dialog.accept()))
+        cancel_button.clicked.connect(dialog.reject)
+        buttons.addWidget(visual_button)
+        buttons.addWidget(start_button)
+        buttons.addWidget(cancel_button)
+        form.addRow(buttons)
+        dialog.exec_()
+
+    # [FITTS ADDED] Public entry point for an ISO target-display test harness.
+    def start_fitts_trial(self, target_x, target_y, target_width):
+        # [FITTS ADDED] Store the selected condition with every new trial row.
+        self.fitts.system_name = self.combo_fitts_system.currentData()
+        self.fitts.participant_id = self.txt_fitts_participant.text().strip() or "participant_01"
+        cx, cy = self._get_cursor_pos()
+        self.fitts_active = True
+        self.fitts.start_trial(target_x, target_y, target_width, cx, cy)
+        self.lbl_fitts_status.setText(
+            f"Trial {self.fitts.trial_id} active — target ({target_x}, {target_y}), width {target_width}px."
+        )
+        self.lbl_fitts_status.setStyleSheet(themed_label_style("success"))
+
+    # [FITTS ADDED] Create a target on the active display at a useful distance from the cursor.
+    def start_visual_fitts_trial(self, target_width):
+        self.fitts_sequence_active = False
+        self.fitts_sequence_widths = []
+        self.fitts_sequence_targets = []
+        self._show_visual_fitts_target(target_width)
+
+    # [FITTS ADDED] Run one balanced 20-target ISO block with four target sizes.
+    def start_visual_fitts_block(self):
+        if self.fitts_active:
+            QMessageBox.warning(self, "Fitts Test Active", "Finish or cancel the current target before starting a full test.")
+            return
+        self.fitts.start_fresh_block()
+        target_sizes = [40, 60, 80, 120]
+        self.fitts_sequence_widths = [target_sizes[index % len(target_sizes)] for index in range(self.fitts.block_size)]
+        random.shuffle(self.fitts_sequence_widths)
+        cx, cy = self._get_cursor_pos()
+        app = QApplication.instance()
+        screen = app.screenAt(QPoint(cx, cy)) if app is not None and hasattr(app, "screenAt") else None
+        screen = screen or (app.primaryScreen() if app is not None else None)
+        if screen is None:
+            QMessageBox.warning(self, "Fitts Test", "Could not determine a display for the test circle.")
+            return
+        geometry = screen.availableGeometry()
+        center_x, center_y = geometry.center().x(), geometry.center().y()
+        radius = max(140, min(geometry.width(), geometry.height()) * 0.30)
+        self.fitts_sequence_targets = []
+        for index, width in enumerate(self.fitts_sequence_widths):
+            angle = -math.pi / 2 + (2 * math.pi * (index % 8) / 8)
+            self.fitts_sequence_targets.append((
+                int(center_x + radius * math.cos(angle)), int(center_y + radius * math.sin(angle)), width
+            ))
+        self.fitts_sequence_active = True
+        self.lbl_fitts_status.setText("Full test started: 20 targets with 40, 60, 80, and 120 px diameters.")
+        self.lbl_fitts_status.setStyleSheet(themed_label_style("success"))
+        self._start_next_visual_fitts_target()
+
+    # [FITTS ADDED] Advance the automated block after each completed target.
+    def _start_next_visual_fitts_target(self):
+        if not self.fitts_sequence_widths:
+            self.fitts_sequence_active = False
+            return
+        target_width = self.fitts_sequence_widths.pop(0)
+        target_x, target_y, _ = self.fitts_sequence_targets.pop(0)
+        self._show_visual_fitts_target(target_width, target_x, target_y, self.fitts_sequence_targets)
+
+    # [FITTS ADDED] Display one target used by either a one-off or full visual test.
+    def _show_visual_fitts_target(self, target_width, fixed_x=None, fixed_y=None, circle_targets=None):
+        cx, cy = self._get_cursor_pos()
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if app is not None and hasattr(app, "screenAt"):
+            screen = app.screenAt(QPoint(cx, cy)) or screen
+        if screen is None:
+            QMessageBox.warning(self, "Fitts Target", "Could not determine a display for the visual target.")
+            return
+        geometry = screen.availableGeometry()
+        margin = max(80, int(target_width))
+        target_x, target_y = fixed_x or geometry.center().x(), fixed_y or geometry.center().y()
+        if fixed_x is None or fixed_y is None:
+            for _ in range(20):
+                candidate_x = random.randint(geometry.left() + margin, geometry.right() - margin)
+                candidate_y = random.randint(geometry.top() + margin, geometry.bottom() - margin)
+                if math.hypot(candidate_x - cx, candidate_y - cy) >= min(300, max(120, target_width * 2)):
+                    target_x, target_y = candidate_x, candidate_y
+                    break
+        self.start_fitts_trial(target_x, target_y, target_width)
+        self._close_fitts_overlay()
+        self.fitts_target_overlay = FittsTargetOverlay(target_x, target_y, target_width, self, circle_targets)
+        self.fitts_target_overlay.setGeometry(geometry)
+        self.fitts_target_overlay.cursor_sampled.connect(self._record_fitts_overlay_cursor)
+        self.fitts_target_overlay.target_clicked.connect(self._record_fitts_overlay_click)
+        self.fitts_target_overlay.rejected.connect(self._cancel_fitts_trial)
+        self.fitts_target_overlay.show()
+        self.fitts_target_overlay.raise_()
+        self.fitts_target_overlay.activateWindow()
+
+    # [FITTS ADDED] Collect normal physical-mouse movement on the visual target screen.
+    def _record_fitts_overlay_cursor(self, x, y, timestamp):
+        if self.fitts_active and self.fitts._in_trial():
+            self.fitts.record_cursor(x, y, timestamp)
+
+    # [FITTS ADDED] Physical clicks and EMG-generated clicks both finish visual trials.
+    def _record_fitts_overlay_click(self, x, y, inside_target):
+        if self.fitts_active and self.fitts._in_trial():
+            self.fitts.record_click(x, y, inside_target=inside_target)
+
+    # [FITTS ADDED] Esc closes the overlay without saving an incomplete trial.
+    def _cancel_fitts_trial(self):
+        if not self.fitts_active and not self.fitts._in_trial():
+            return
+        if self.fitts_active and self.fitts._in_trial():
+            self.fitts._reset_trial_state()
+        self.fitts_active = False
+        self.fitts_sequence_active = False
+        self.fitts_sequence_widths = []
+        self.fitts_sequence_targets = []
+        self.fitts_target_overlay = None
+        self.lbl_fitts_status.setText("Visual trial cancelled. No trial row was saved.")
+        self.lbl_fitts_status.setStyleSheet(themed_label_style("muted"))
+
+    # [FITTS ADDED] Dismiss the target after a completed trial or before a new one.
+    def _close_fitts_overlay(self):
+        if self.fitts_target_overlay is not None:
+            overlay = self.fitts_target_overlay
+            self.fitts_target_overlay = None
+            overlay.close()
+
+    # [FITTS ADDED] Save all completed trial rows and report the latest block.
+    def save_fitts_log(self):
+        self.fitts.save_csv(self.fitts_csv_path)
+        print(f"Fitts log saved to {self.fitts_csv_path}")
+        summary = self.fitts.block_summary_text()
+        if summary:
+            print(summary)
+            self.lbl_fitts_status.setText(summary)
+
+    # [FITTS ADDED] Mark one trial complete and display a completed-block summary.
+    def _on_fitts_trial_complete(self):
+        self.fitts_active = False
+        self._close_fitts_overlay()
+        # [FITTS ADDED] Persist every completed trial immediately so a later
+        # application crash cannot discard metrics recorded since the last save.
+        try:
+            self.fitts.save_csv(self.fitts_csv_path)
+        except OSError as exc:
+            self.lbl_fitts_status.setText(f"Trial recorded, but CSV auto-save failed: {exc}")
+            self.lbl_fitts_status.setStyleSheet(themed_label_style("danger"))
+            return
+        summary = self.fitts.block_summary_text()
+        if summary:
+            regression = self.fitts.regression_summary(self.fitts.system_name, self.fitts.participant_id)
+            if regression:
+                summary += (
+                    f"\nMT regression: intercept {regression['intercept_s'] * 1000:.0f} ms, "
+                    f"slope {regression['slope_s_per_bit'] * 1000:.0f} ms/bit, R² {regression['r_squared']:.2f}."
+                )
+            self.lbl_fitts_status.setText(summary)
+        else:
+            self.lbl_fitts_status.setText(
+                f"Trial {self.fitts.trial_id} recorded. "
+                f"{len(self.fitts.block_trials)}/{self.fitts.block_size} trials in current block."
+            )
+        self.lbl_fitts_status.setStyleSheet(themed_label_style("success"))
+        if self.fitts_sequence_active and self.fitts_sequence_widths:
+            completed = self.fitts.block_size - len(self.fitts_sequence_widths)
+            self.lbl_fitts_status.setText(f"Target {completed}/{self.fitts.block_size} complete. Preparing the next target...")
+            QTimer.singleShot(300, self._start_next_visual_fitts_target)
+        elif self.fitts_sequence_active:
+            self.fitts_sequence_active = False
 
     def refresh_ports(self):
         self.combo_ports.clear()
@@ -1386,9 +2044,24 @@ class MouseControllerApp(QMainWindow):
                 self.mouse_backend.click(button="right")
             elif action == "Double Click":
                 self.mouse_backend.click(button="left", clicks=2)
+            # [FITTS ADDED] A generated click closes the current ISO trial.
+            if self.fitts_active and self.fitts._in_trial():
+                cx, cy = self._get_cursor_pos()
+                inside = self.fitts._point_in_target(cx, cy)
+                self.fitts.record_click(cx, cy, inside_target=inside)
             self.last_click_time = now
         except (MouseSafetyTriggered, pyautogui.FailSafeException if HAS_PYAUTOGUI else RuntimeError):
             self._disable_for_safety()
+
+    # [FITTS ADDED] Read the real pointer position for metrics without moving it.
+    def _get_cursor_pos(self):
+        if self.mouse_backend.uses_quartz:
+            point = self.mouse_backend._quartz_position()
+            return int(point.x), int(point.y)
+        if HAS_PYAUTOGUI:
+            point = pyautogui.position()
+            return int(point.x), int(point.y)
+        return 0, 0
 
     def _disable_for_safety(self):
         self.btn_mouse_toggle.setChecked(False)
@@ -1400,6 +2073,10 @@ class MouseControllerApp(QMainWindow):
             return
 
         now = time.monotonic()
+        # [FITTS ADDED] Sample the pointer at the controller's native 120 Hz cadence.
+        if self.fitts_active and self.fitts._in_trial():
+            cx, cy = self._get_cursor_pos()
+            self.fitts.record_cursor(cx, cy, time.perf_counter())
         elapsed_s = min(max(now - self._last_motion_tick, 0.001), 0.050)
         self._last_motion_tick = now
 
@@ -1441,6 +2118,16 @@ class MouseControllerApp(QMainWindow):
         if self.inference_worker:
             self.inference_worker.stop()
         event.accept()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._screen_fitted_once:
+            QTimer.singleShot(0, self._fit_to_current_screen)
+            self._screen_fitted_once = True
+
+    def _fit_to_current_screen(self):
+        """Open the controller maximized so both control columns stay readable."""
+        self.showMaximized()
 
 
 if __name__ == "__main__":

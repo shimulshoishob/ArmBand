@@ -113,6 +113,37 @@ device-free testing, select **Wired Serial / Simulator** and then
 **Simulator (local)**. The keyboard controls `A` / left arrow and `D` / right
 arrow are also available for testing the basket movement and game mechanics.
 
+### ISO 9241-9 / Fitts' Law metrics
+
+The adaptive mouse controller (`code/mouse.py`) includes a **Fitts Metrics
+(ISO 9241-9)** performance panel on the right side of its maximized window for
+quantitative cursor-control evaluation. Choose a CSV log location and select
+**Start Test Trial**. Then select **Start Visual Target** to show a full-screen
+glowing target automatically. Move the pointer to the target and click it; the
+application records the trial and automatically saves the CSV. Press `Esc` to
+cancel an unfinished visual trial. Manual X/Y target coordinates remain
+available for an external test harness.
+
+For the recommended complete measurement, choose the system and click **Start
+Full Test (20 Targets)**. The app displays 20 targets one after another, using
+mixed target diameters of 40, 60, 80, and 120 pixels. When the final target is
+completed, it calculates one combined ISO block summary for the whole set.
+
+The log contains movement time, effective width and index of difficulty,
+throughput, path efficiency, re-entries, directional reversals, time to first
+movement, and click errors. Blocks contain 20 trials by default; completing a
+block shows its throughput, error-rate, and path-efficiency summary.
+
+Use the **Test System** selector before starting a trial to label the CSV rows
+as `normal_mouse`, `old_emg`, or `new_emg`. Keep the target locations, target
+widths, trial order, sensitivity settings, and block size the same for every
+condition. Compare the resulting block mean throughput (higher is better),
+error rate (lower is better), and path efficiency (higher is better).
+
+The visual target also records normal physical-mouse movement and clicks. This
+makes it suitable for a `normal_mouse` baseline as well as `old_emg` and
+`new_emg` device conditions.
+
 For simulator testing:
 
 1. Start `code/emg_simulator_app.py`.

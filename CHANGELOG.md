@@ -179,6 +179,110 @@ selector in the game setup panel. Both paths feed the same model inference and
 basket-control logic, so a user can switch hardware transport without changing
 the game or retraining the model.
 
+### 7. ISO 9241-9 / Fitts' Law metrics for adaptive mouse control
+
+**Files changed:** `code/mouse.py`, `README.md`
+
+Added `FittsMetricsCollector`, a self-contained `QObject` that measures the
+quality of EMG-driven cursor target acquisition without changing any existing
+streaming, classification, movement, or click-control logic. The collector is
+only called through lightweight hooks in the existing mouse-motion and click
+methods while an ISO trial is active.
+
+Each trial records the cursor start position, target centre and diameter,
+movement time (MT), distance (D), nominal width (W), effective width (We),
+effective index of difficulty (IDe), and throughput (TP). It also measures
+path efficiency, time to first movement, target re-entries, X/Y directional
+reversals, and whether the generated click was correct or an error.
+
+Metrics are collected at the existing 120 Hz mouse-control cadence. Cursor
+positions are used to calculate travelled path length and an effective-width
+estimate. The implementation uses safe fallbacks when a trial has very few
+samples so We, path length, and all derived values remain valid.
+
+Trials are grouped into blocks of 20 by default. At block completion, the app
+calculates mean and standard-deviation throughput, error rate, mean path
+efficiency, mean re-entry count, and mean reversal count. The Fitts panel
+shows the latest completed block summary.
+
+The new collapsible **Fitts Metrics (ISO 9241-9)** panel in the mouse
+controller lets a user select the CSV location, start a trial by entering a
+target's X/Y location and width, inspect trial/block status, and manually save
+the log. Completed trials are also automatically written to the CSV, with a
+flush after every row, so the current session is retained even if the app later
+stops unexpectedly. CSV floats are rounded to four decimal places.
+
+### 8. Mouse controller readability and comparison labels
+
+**Files changed:** `code/mouse.py`, `README.md`
+
+The mouse controller window is now wider by default (820 px), with a larger
+minimum size, 16 px standard labels/fields, taller text inputs and spin boxes,
+larger group titles, buttons with a minimum readable height, and a clearer
+32 px live-prediction label. The header subtitle and safety message were also
+increased. This makes connection controls, model mappings, confidence/speed
+settings, and Fitts controls legible without relying on tiny UI text.
+
+The Fitts panel now includes a **Test System** selector: `normal_mouse`,
+`old_emg`, and `new_emg`. The selected value is stored on each new trial so
+multiple conditions can be exported to one CSV and compared later. The README
+documents a fair comparison protocol: use the same target schedule and
+settings, then compare block throughput, error rate, and path efficiency.
+
+The controller also runs a one-time post-show sizing pass, allowing the larger
+readable layout to adapt to the display where macOS finally places the window.
+
+### 9. Fullscreen mouse-controller layout and clearer Fitts guidance
+
+**Files changed:** `code/mouse.py`, `README.md`
+
+The mouse controller now opens maximized. This gives the app enough room to
+show the EMG connection/mapping controls and the ISO metrics interface at the
+same time, rather than forcing the user to open a compressed section in a
+narrow vertical layout.
+
+The Fitts metrics group was moved from the bottom of the window to a dedicated
+right-hand panel. It is no longer collapsed by default, has a fixed readable
+width, and begins with a plain-language four-step guide: choose the system,
+start a trial, move/click the target, and let the app save the result. This
+keeps the explanation, test-system selector, CSV controls, status, and action
+buttons visible without reducing the size of the main controller controls.
+
+### 10. Visual Fitts target and physical-mouse baseline support
+
+**Files changed:** `code/mouse.py`, `README.md`
+
+Added a full-screen visual target overlay for the Fitts test workflow. Selecting
+**Start Visual Target** now places a glowing circular target at a usable random
+location on the active display, away from the initial cursor position. The
+overlay explains the task, shows crosshairs around the target, and closes after
+the trial completes. `Esc` cancels an incomplete trial without writing a row.
+
+The overlay samples normal physical pointer motion and captures physical mouse
+clicks, in addition to the existing EMG-generated click hook. This means the
+same guided target test can now be used to collect `normal_mouse`, `old_emg`,
+and `new_emg` conditions in a single CSV, using the Test System selector. The
+README was corrected to reflect that an external physical-click harness is no
+longer required for the normal-mouse baseline.
+
+### 11. Automated multi-target Fitts blocks
+
+**Files changed:** `code/mouse.py`, `README.md`
+
+Added **Start Full Test (20 Targets)** to the right-hand Fitts panel. It starts
+a clean metrics block and presents targets one at a time, automatically moving
+to the next after each click. The default block contains a balanced shuffled
+mix of four target diameters: 40, 60, 80, and 120 pixels. Target locations are
+also generated away from the current cursor position, so each trial requires a
+meaningful movement.
+
+After the twentieth target, the collector completes the block and reports the
+combined mean throughput and standard deviation, error rate, path efficiency,
+re-entry count, and reversal count. This provides one comparable result for
+each system condition rather than requiring manual calculations from individual
+targets. The sequence automatically respects a different configured block size
+if that value is changed in code.
+
 ### Validation completed
 
 The following checks were run after these changes:
@@ -192,6 +296,13 @@ The following checks were run after these changes:
   basket movement and animation-timer startup.
 - Headless checks confirming that Fruit Catcher switches correctly between its
   wireless ESP32 and wired/simulator connection panels.
+- Fitts collector unit-style checks covering correct and incorrect clicks,
+  first-movement timing, completed-block summary generation, CSV columns and
+  export, plus a headless mouse-controller UI check for the new panel.
+- Headless visual-target checks confirming that an overlay opens, activates an
+  ISO trial, and cancels safely without persisting an incomplete row.
+- Automated multi-target checks confirming target-by-target advancement and a
+  combined block summary after the final target.
 
 ## Documentation policy
 
