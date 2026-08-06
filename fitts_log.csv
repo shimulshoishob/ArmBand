@@ -1,0 +1,4 @@
+participant_id,system,block_id,trial_id,MT,D,W,ID,De,We,IDe,TP,path_efficiency,re_entry_count,reversal_count_x,reversal_count_y,time_to_first_move,click_correct,click_error,wrong_click,spurious_click
+participant_01,old_emg,1,2,1.1015,443.4242,80.0,2.7099,443.4242,717.6849,0.6941,0.6301,0.7466,0,1,0,0.3219,True,False,False,False
+participant_01,old_emg,2,3,1.2303,760.724,80.0,3.3936,760.724,529.2456,1.2853,1.0447,0.7549,0,3,2,0.2799,True,False,False,False
+participant_01,old_emg,2,4,1.1051,189.4228,60.0,2.0556,189.4228,428.4828,0.5281,0.4779,0.2101,0,1,1,0.0932,False,True,True,False

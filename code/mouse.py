@@ -138,8 +138,9 @@ class MouseBackend:
 
 # Available Mouse Actions
 MOUSE_ACTIONS = [
-    "Ignore", 
-    "Move Up", "Move Down", "Move Left", "Move Right", 
+    "Ignore",
+    "Move Up", "Move Down", "Move Left", "Move Right",
+    "Move Up-Left", "Move Up-Right", "Move Down-Left", "Move Down-Right",
     "Left Click", "Right Click", "Double Click"
 ]
 
@@ -1169,8 +1170,13 @@ class MouseControllerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BioWave - Adaptive Mouse Controller")
-        self.resize(820, 920)
-        self.setMinimumSize(700, 720)
+        # Sized for a MacBook 13" display (1280x800 logical points). The old
+        # 820x920 default was taller than the screen itself (portrait-ish,
+        # ~0.89 aspect ratio) which clipped off-screen on restore/un-maximize.
+        # 1180x700 keeps a landscape ratio (~1.69) that leaves room for the
+        # menu bar/dock on a 13" screen while still fitting larger displays.
+        self.resize(1100, 660)
+        self.setMinimumSize(900, 560)
         
         if not HAS_RF:
             QMessageBox.critical(self, "Missing File", "rf_features.py must be in the same folder!")
@@ -1222,7 +1228,14 @@ class MouseControllerApp(QMainWindow):
         self.curr_vy = 0.0
         self.acc_x = 0.0
         self.acc_y = 0.0
-        self.smooth_alpha = 0.35  # Acceleration / deceleration smoothing coefficient
+        # Acceleration uses a gentle alpha so the cursor ramps up smoothly;
+        # deceleration/reversal uses a larger alpha so it stops crisply without
+        # the lingering exponential tail that reads as drift.
+        self.smooth_accel_alpha = 0.30
+        self.smooth_decel_alpha = 0.55
+        # Below this residual speed (px/sec) the cursor snaps to a full stop
+        # instead of slowly creeping after a gesture is released.
+        self.stop_velocity_threshold = 8.0
 
         # A precise 120 Hz timer keeps native macOS cursor events responsive.
         # Velocity is expressed in pixels/second, so the perceived speed is
@@ -1496,32 +1509,42 @@ class MouseControllerApp(QMainWindow):
         fitts_layout.addWidget(self.fitts_content)
         layout.addWidget(self.grp_fitts)
 
-        # Keep the main EMG controls on the left and explanations/metrics on
-        # the right, where the Fitts text has enough width to remain readable.
+        # Everything used to be stacked (and partly side-by-side) on one
+        # page, which on a MacBook 13" screen pushed content past the
+        # visible area and made whole sections scroll out of view / hide
+        # behind others. Instead, give each task its own tab ("option box")
+        # so only one section is on screen at a time, and keep only the
+        # live status/control readout permanently visible underneath.
+        for widget in (grp_setup, grp_map, grp_settings, self.grp_fitts):
+            layout.removeWidget(widget)
         for widget in (
-            grp_setup, grp_map, grp_settings, self.lbl_status, self.lbl_prediction,
-            self.lbl_conf, self.btn_mouse_toggle, self.lbl_safety, self.grp_fitts,
+            self.lbl_status, self.lbl_prediction, self.lbl_conf,
+            self.btn_mouse_toggle, self.lbl_safety,
         ):
             layout.removeWidget(widget)
-        left_column = QWidget()
-        left_layout = QVBoxLayout(left_column)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
-        left_layout.addWidget(grp_setup)
-        left_layout.addWidget(grp_map, 1)
-        left_layout.addWidget(grp_settings)
-        left_layout.addWidget(self.lbl_status)
-        left_layout.addWidget(self.lbl_prediction)
-        left_layout.addWidget(self.lbl_conf)
-        left_layout.addWidget(self.btn_mouse_toggle)
-        left_layout.addWidget(self.lbl_safety)
-        self.grp_fitts.setMinimumWidth(370)
-        self.grp_fitts.setMaximumWidth(500)
-        content_row = QHBoxLayout()
-        content_row.setSpacing(16)
-        content_row.addWidget(left_column, 3)
-        content_row.addWidget(self.grp_fitts, 2)
-        layout.addLayout(content_row, 1)
+
+        self.main_tabs = QTabWidget()
+        self.main_tabs.addTab(grp_setup, "1. Connect && Model")
+        self.main_tabs.addTab(grp_map, "2. Action Mapping")
+        self.main_tabs.addTab(grp_settings, "3. Control Settings")
+        self.main_tabs.addTab(self.grp_fitts, "Fitts Metrics")
+        layout.addWidget(self.main_tabs, 1)
+
+        # Persistent bar: current prediction, confidence, the mouse-control
+        # toggle and the safety reminder stay visible no matter which tab
+        # is open, since these are the things you need live while working
+        # in any of the tabs above.
+        status_bar = QFrame()
+        status_bar.setObjectName("mouseStatusBar")
+        status_layout = QVBoxLayout(status_bar)
+        status_layout.setContentsMargins(0, 8, 0, 0)
+        status_layout.setSpacing(6)
+        status_layout.addWidget(self.lbl_status)
+        status_layout.addWidget(self.lbl_prediction)
+        status_layout.addWidget(self.lbl_conf)
+        status_layout.addWidget(self.btn_mouse_toggle)
+        status_layout.addWidget(self.lbl_safety)
+        layout.addWidget(status_bar)
 
         if not HAS_MOUSE_CONTROL:
             QMessageBox.warning(
@@ -1807,7 +1830,15 @@ class MouseControllerApp(QMainWindow):
             combo.addItems(MOUSE_ACTIONS)
             
             clower = cls.lower()
-            if "up" in clower: combo.setCurrentText("Move Up")
+            if "up" in clower and "left" in clower and "click" not in clower:
+                combo.setCurrentText("Move Up-Left")
+            elif "up" in clower and "right" in clower and "click" not in clower:
+                combo.setCurrentText("Move Up-Right")
+            elif "down" in clower and "left" in clower and "click" not in clower:
+                combo.setCurrentText("Move Down-Left")
+            elif "down" in clower and "right" in clower and "click" not in clower:
+                combo.setCurrentText("Move Down-Right")
+            elif "up" in clower: combo.setCurrentText("Move Up")
             elif "down" in clower: combo.setCurrentText("Move Down")
             elif "left" in clower and "click" not in clower: combo.setCurrentText("Move Left")
             elif "right" in clower and "click" not in clower: combo.setCurrentText("Move Right")
@@ -2083,7 +2114,18 @@ class MouseControllerApp(QMainWindow):
         action = self.current_active_action
         base_speed = float(self.spin_speed.value())
 
-        # Determine target velocity
+        # Scale speed by confidence: a weak/uncertain gesture moves slower, so
+        # direction flips while confidence is low feel less violent.
+        req_conf = self.spin_conf.value()
+        if self.current_active_conf > req_conf:
+            gain = 0.5 + 0.5 * min(1.0, (self.current_active_conf - req_conf) / max(1.0, 100.0 - req_conf))
+        else:
+            gain = 1.0
+        base_speed *= gain
+
+        # Determine target velocity. Diagonal actions keep the same total
+        # speed by scaling each axis by 1/sqrt(2).
+        diagonal_scale = 0.7071
         target_vx, target_vy = 0.0, 0.0
         if action == "Move Up":
             target_vy = -base_speed
@@ -2093,10 +2135,33 @@ class MouseControllerApp(QMainWindow):
             target_vx = -base_speed
         elif action == "Move Right":
             target_vx = base_speed
+        elif action == "Move Up-Left":
+            target_vx, target_vy = -base_speed * diagonal_scale, -base_speed * diagonal_scale
+        elif action == "Move Up-Right":
+            target_vx, target_vy = base_speed * diagonal_scale, -base_speed * diagonal_scale
+        elif action == "Move Down-Left":
+            target_vx, target_vy = -base_speed * diagonal_scale, base_speed * diagonal_scale
+        elif action == "Move Down-Right":
+            target_vx, target_vy = base_speed * diagonal_scale, base_speed * diagonal_scale
 
-        # Exponential velocity interpolation (acceleration / deceleration smoothing)
-        self.curr_vx = self.smooth_alpha * target_vx + (1.0 - self.smooth_alpha) * self.curr_vx
-        self.curr_vy = self.smooth_alpha * target_vy + (1.0 - self.smooth_alpha) * self.curr_vy
+        # Exponential velocity interpolation. Accelerate gently; decelerate or
+        # reverse quickly so stopping tracks the gesture without overshoot.
+        alpha_x = self.smooth_decel_alpha if (target_vx == 0.0 and self.curr_vx != 0.0) or (
+            target_vx != 0.0 and self.curr_vx != 0.0 and target_vx * self.curr_vx < 0.0
+        ) else self.smooth_accel_alpha
+        alpha_y = self.smooth_decel_alpha if (target_vy == 0.0 and self.curr_vy != 0.0) or (
+            target_vy != 0.0 and self.curr_vy != 0.0 and target_vy * self.curr_vy < 0.0
+        ) else self.smooth_accel_alpha
+
+        self.curr_vx = alpha_x * target_vx + (1.0 - alpha_x) * self.curr_vx
+        self.curr_vy = alpha_y * target_vy + (1.0 - alpha_y) * self.curr_vy
+
+        # Dead-band: when the target is a stop, zero out any residual drift
+        # below the threshold instead of letting it decay forever.
+        if target_vx == 0.0 and abs(self.curr_vx) < self.stop_velocity_threshold:
+            self.curr_vx = 0.0
+        if target_vy == 0.0 and abs(self.curr_vy) < self.stop_velocity_threshold:
+            self.curr_vy = 0.0
 
         # Sub-pixel accumulation. curr_v* is pixels/second, not pixels/tick.
         self.acc_x += self.curr_vx * elapsed_s
@@ -2126,8 +2191,35 @@ class MouseControllerApp(QMainWindow):
             self._screen_fitted_once = True
 
     def _fit_to_current_screen(self):
-        """Open the controller maximized so both control columns stay readable."""
-        self.showMaximized()
+        """Size the controller to the current screen instead of always going
+        full-screen. On a MacBook 13" (1280x800 logical points) this keeps
+        the window's landscape aspect ratio intact and leaves the menu bar
+        and dock visible; on larger displays it still uses a generous,
+        readable size rather than stretching both columns edge-to-edge."""
+        screen = self.screen() if hasattr(self, "screen") else None
+        if screen is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+
+        if screen is None:
+            self.showMaximized()
+            return
+
+        available = screen.availableGeometry()
+
+        # Fill most of the available screen, but keep a small margin so the
+        # window doesn't butt up against the menu bar/dock on a 13" laptop.
+        target_width = min(int(available.width() * 0.92), 1400)
+        target_height = min(int(available.height() * 0.90), 900)
+        target_width = max(target_width, self.minimumWidth())
+        target_height = max(target_height, self.minimumHeight())
+
+        self.resize(target_width, target_height)
+
+        # Center the window within the available screen area.
+        x = available.x() + (available.width() - target_width) // 2
+        y = available.y() + (available.height() - target_height) // 2
+        self.move(x, y)
 
 
 if __name__ == "__main__":
