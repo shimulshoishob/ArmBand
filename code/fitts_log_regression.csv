@@ -1,0 +1,2 @@
+participant_id,system,intercept_s,slope_s_per_bit,r_squared,n
+participant_01,old_emg,0.3997,0.2946,0.0427,21
