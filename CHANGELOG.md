@@ -5,6 +5,88 @@ It is written to explain both **what changed** and **why it changed**, so the
 application can be maintained and improved without needing to reconstruct the
 reasoning from the source code alone.
 
+## 2026-08-15 — Adaptive mouse control for better comparison against trackpad/mouse
+
+**Files changed:** `code/mouse.py`
+
+The EMG cursor controller in `code/mouse.py` was previously constant-speed:
+each mapped direction gesture moved the pointer at a fixed pixel rate until the
+gesture was released. For an ISO 9241-9 / Fitts' law comparison against a normal
+mouse or trackpad this has two predictable weaknesses — coarse overshoot on
+large movements, and no way to do slow, precise final positioning. Together
+those inflate movement time, produce wandering paths (low path efficiency), and
+cause re-entries and reversals. This change adds three controls to close that
+gap, each tunable in the **3. Control Settings** tab:
+
+### 1. Adaptive rate control (hold gesture to speed up)
+
+Each time a new direction gesture is held, the cursor starts slow for precise
+entry into a target and ramps toward full speed over roughly a quarter second.
+Re-engaging a direction restarts the ramp, so the short flicks used for fine
+corrections stay slow and gentle while long held movements keep full speed. The
+result is a smoother approach curve (fewer overshoots, reversals, and
+re-entries) without a distance-based "autopilot" that would make the Fitts
+comparison unfair. Disable the `Adaptive Rate` checkbox for constant-speed
+control, which is useful for an A/B comparison within the thesis itself.
+
+### 2. Confidence-gear speed scaling (fixed and smoothed)
+
+Cursor speed is now scaled continuously by the smoothed classifier confidence
+between a floor of 70% of the set speed (at the confidence threshold) and full
+speed (at 100% confidence). The old code only applied a speed factor when the
+gesture was already accepted, and it had an inverted fallback that ran at full
+speed for low-confidence predictions. The smoothed confidence removes the abrupt
+fast/slow snapping as predictions jitter near the threshold, so direction flips
+while confidence is low feel less violent.
+
+### 3. Click debounce (hold-to-confirm) and one-click-per-activation
+
+A mapped click gesture no longer fires on the first prediction. The gesture must
+be sustained for the `Click Debounce Hold` duration (default 150 ms) before the
+click is delivered, and each activation produces exactly one click until the
+gesture returns to a non-click action. This suppresses spurious clicks from
+classifier flicker, which directly lowers the Fitts error rate.
+
+### 4. Scroll Up / Scroll Down mouse actions
+
+Two new actions (`Scroll Up`, `Scroll Down`) were added to the action mapper so
+the armband can scroll documents and web pages, which matters for the qualitative
+"everyday tasks" part of the comparison. Scrolling uses native Quartz wheel events
+on macOS (line-scroll unit) with a per-second line rate set by the new **Scroll
+Speed** control, and falls back to `pyautogui.scroll` elsewhere, matching
+PyAutoGUI's sign convention (positive = up). The live status bar now also shows
+the current effective cursor speed so the ramp behavior can be watched while
+tuning.
+
+**Methodology note:** the ISO 9241-9 panel already supports a `new_emg` test
+condition. To report the impact of these changes, record one block with
+`Adaptive Rate` **enabled** (new device) and one with it **disabled** (old
+device) under the same target layout, then compare block throughput, error rate,
+and path efficiency in the exported CSVs.
+
+### 5. Thesis comparison analysis and figures
+
+**Files changed:** `code/compare_devices.py`, `requirements.txt`, `README.md`
+
+Added `code/compare_devices.py`, a standalone analysis script that loads the
+exported Fitts/ISO 9241-9 CSVs (trials, `*_block_summary`, `*_regression`) from
+any folder, normalises both the current and the older `compare_mouse` log
+schema, and renders comparison figures so the `normal_mouse` baseline, the old
+constant-speed EMG device, and the improved adaptive-rate EMG device can be
+compared visually. Each figure is saved as PNG and PDF into
+`comparison_report/`, plus a `comparison_summary.csv` aggregate table and a
+printed interpretation:
+
+- throughput per device (with per-trial dots and per-block means),
+- Fitts' law MT-vs-ID regression scatter with fitted lines and R²,
+- click error / wrong-target / spurious-click rates,
+- path efficiency, re-entries, and reversals,
+- throughput-by-ID-band to show behaviour at increasing difficulty,
+- a combined 2×2 `overview_all_metrics` figure for reuse in the thesis.
+
+`requirements.txt` now includes `matplotlib` and `pandas` for the analysis
+script.
+
 ## 2026-08-01 — macOS performance, responsive layout, and visual refresh
 
 ### 1. Faster macOS mouse control

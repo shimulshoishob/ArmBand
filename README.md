@@ -77,6 +77,17 @@ The controller's speed setting is expressed in pixels per second (default:
 rate. Moving the cursor to any display corner still immediately disables
 control as a safety stop.
 
+The controller uses **adaptive rate control**: each newly-held direction starts
+slowly for precise positioning and ramps toward full speed as it is held, so
+large movements stay fast while fine final corrections stay gentle. Cursor
+speed is also scaled continuously by the smoothed gesture confidence, and
+clicks require a short "hold to confirm" debounce before firing (once per
+activation), which suppresses spurious clicks. **Scroll Up**/ **Scroll Down**
+actions use native Quartz wheel events on macOS. All of these are tunable in
+the **3. Control Settings** tab; the live status bar shows the current
+effective cursor speed while tuning. Unchecked `Adaptive Rate` gives the old
+constant-speed behavior, useful for an A/B comparison.
+
 ## Running The App
 
 From the repository root:
@@ -143,6 +154,38 @@ error rate (lower is better), and path efficiency (higher is better).
 The visual target also records normal physical-mouse movement and clicks. This
 makes it suitable for a `normal_mouse` baseline as well as `old_emg` and
 `new_emg` device conditions.
+
+### Comparison analysis and figures
+
+`code/compare_devices.py` reads the trial, block-summary, and regression CSVs,
+normalises them (including the older `compare_mouse` log format), and renders
+comparison figures so the difference between devices is easy to see and embed
+in a thesis:
+
+- **comparison_throughput** — mean throughput per device (error bars plus
+  per-trial points and per-block means; higher is better).
+- **comparison_regression** — Fitts' law movement-time vs. index-of-difficulty
+  scatter with the fitted lines (MT = a + b·ID) and R².
+- **comparison_errors** — error, wrong-target, and spurious-click rates.
+- **comparison_path_metrics** — path efficiency, re-entries, reversals.
+- **comparison_tp_by_id** — throughput within ID bands, showing how each device
+  copes as targets get harder.
+- **overview_all_metrics** — the five above combined on one 2×2 figure for a
+  slide.
+
+PNG and vector PDF are saved for every figure, plus a `comparison_summary.csv`
+aggregate table and a printed interpretation. Run it from the repository root:
+
+```powershell
+python code/compare_devices.py                          # scan default folders
+python code/compare_devices.py --out report --dir compare_mouse
+python code/compare_devices.py --system normal_mouse new_emg
+```
+
+For a valid comparison, collect at least one 20-target block per condition with
+the same target layout and settings, labelled `normal_mouse`, `old_emg` (the
+previous constant-speed device) and `new_emg` (adaptive-rate device), then
+re-run the script.
 
 For simulator testing:
 

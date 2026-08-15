@@ -1,4 +1,6 @@
 ﻿numpy
+pandas
+matplotlib
 pyqt5
 pyqtgraph
 pyserial

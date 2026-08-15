@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QMessageBox, QFileDialog, QFrame,
     QGroupBox, QSpinBox, QDoubleSpinBox, QScrollArea, QDialog, QTabWidget, QRadioButton,
-    QButtonGroup, QStackedWidget, QSlider
+    QButtonGroup, QStackedWidget, QSlider, QCheckBox
 )
 from PyQt5.QtCore import QObject, QPoint, QThread, pyqtSignal, QTimer, Qt  # [FITTS ADDED]
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
@@ -136,13 +136,39 @@ class MouseBackend:
         else:
             pyautogui.click(button=button)
 
+    def scroll(self, direction, ticks=1):
+        """Scroll the pointer's window. direction is +1 for up, -1 for down.
+
+        The sign convention matches PyAutoGUI's scroll() (positive = up) so a
+        mapped "Scroll Up" action behaves consistently on both backends. If the
+        user has macOS natural scrolling enabled the physical wheel direction
+        flips, but the action label always refers to the on-screen scroll.
+        """
+        ticks = max(1, int(ticks))
+        if self.uses_quartz:
+            # Negative line delta scrolls the content up, like PyAutoGUI.
+            wheel_delta = -ticks if direction > 0 else ticks
+            event = Quartz.CGEventCreateScrollWheelEvent(
+                None, Quartz.kCGScrollEventUnitLine, 1, wheel_delta
+            )
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            return
+        pyautogui.scroll(ticks if direction > 0 else -ticks)
+
 # Available Mouse Actions
 MOUSE_ACTIONS = [
     "Ignore",
     "Move Up", "Move Down", "Move Left", "Move Right",
     "Move Up-Left", "Move Up-Right", "Move Down-Left", "Move Down-Right",
+    "Scroll Up", "Scroll Down",
     "Left Click", "Right Click", "Double Click"
 ]
+
+# Continuous cursor actions (each axis scaled by 1/sqrt(2) on diagonals).
+MOVE_ACTIONS = (
+    "Move Up", "Move Down", "Move Left", "Move Right",
+    "Move Up-Left", "Move Up-Right", "Move Down-Left", "Move Down-Right",
+)
 
 # Wireless & Communication Constants
 WIFI_STREAM_PORT = 5000
@@ -1209,7 +1235,6 @@ class MouseControllerApp(QMainWindow):
         self.class_action_map = {}  # { "class_name" : "Action" }
         self.mapping_combos = []
         self.last_click_time = 0.0
-        self.last_clicked_action = ""
         self.pred_history = deque(maxlen=5) # Sliding window for prediction majority vote
         self.current_active_action = "Ignore"
         self.current_active_conf = 0.0
@@ -1246,6 +1271,28 @@ class MouseControllerApp(QMainWindow):
         self.smooth_motion_timer.timeout.connect(self.update_smooth_mouse_motion)
         self._last_motion_tick = time.monotonic()
         self.mouse_backend = MouseBackend()
+
+        # --- Adaptive control state ---
+        # Confidences arrive at the stride cadence (~50 ms); the smoothed value
+        # drives an analog speed gear instead of a binary fast/slow switch.
+        self.smoothed_conf = 0.0
+        self.effective_speed = 0.0
+        # Adaptive rate control: each newly-held direction starts slow for
+        # precise entry into a target and ramps toward full speed, so long
+        # moves stay fast while fine corrections stay gentle.
+        self.move_action_start_time = None
+        self._moving_move_active = False
+        self.RATE_MIN_GAIN = 0.40
+        self.RATE_RAMP_TAU = 0.25
+        # Click debounce: a click gesture must be sustained for this long
+        # before it fires, so a flickering prediction cannot cause spurious
+        # clicks. The spin box spin_click_hold overrides the default below.
+        self.mouse_click_active = False
+        self.click_hold_since = None
+        self.click_fired_once = False
+        self._click_hold_default = 0.15
+        # Scroll accumulator for continuous wheel actions (lines remain).
+        self.scroll_accum = 0.0
 
         self.init_ui()
         # [FITTS ADDED] Refresh the metrics panel when a click completes a trial.
@@ -1417,6 +1464,31 @@ class MouseControllerApp(QMainWindow):
         self.spin_speed.setValue(900)
         self.spin_speed.setSuffix(" px/sec")
         set_layout.addRow("Mouse Speed:", self.spin_speed)
+
+        self.chk_adaptive_rate = QCheckBox("Adaptive Rate (hold gesture to speed up)")
+        self.chk_adaptive_rate.setChecked(True)
+        self.chk_adaptive_rate.setToolTip(
+            "Each newly-held direction starts slowly for precise targeting and ramps "
+            "up as long as you keep holding. Turn this off for constant-speed control."
+        )
+        set_layout.addRow(self.chk_adaptive_rate)
+
+        self.spin_click_hold = QDoubleSpinBox()
+        self.spin_click_hold.setRange(0.02, 1.0)
+        self.spin_click_hold.setSingleStep(0.02)
+        self.spin_click_hold.setValue(self._click_hold_default)
+        self.spin_click_hold.setSuffix(" sec")
+        self.spin_click_hold.setToolTip(
+            "How long a click gesture must be sustained before it fires. Higher values "
+            "reduce accidental clicks from flickering gesture predictions."
+        )
+        set_layout.addRow("Click Debounce Hold:", self.spin_click_hold)
+
+        self.spin_scroll_speed = QSpinBox()
+        self.spin_scroll_speed.setRange(5, 150)
+        self.spin_scroll_speed.setValue(30)
+        self.spin_scroll_speed.setSuffix(" lines/sec")
+        set_layout.addRow("Scroll Speed:", self.spin_scroll_speed)
 
         self.spin_cooldown = QDoubleSpinBox()
         self.spin_cooldown.setRange(0.05, 5.0)
@@ -1980,6 +2052,14 @@ class MouseControllerApp(QMainWindow):
             self.curr_vy = 0.0
             self.acc_x = 0.0
             self.acc_y = 0.0
+            self.smoothed_conf = self.spin_conf.value()
+            self.effective_speed = 0.0
+            self.move_action_start_time = None
+            self._moving_move_active = False
+            self.mouse_click_active = False
+            self.click_hold_since = None
+            self.click_fired_once = False
+            self.scroll_accum = 0.0
             self._last_motion_tick = time.monotonic()
             self.smooth_motion_timer.start()
         else:
@@ -1987,6 +2067,12 @@ class MouseControllerApp(QMainWindow):
             self.btn_mouse_toggle.setStyleSheet(themed_button_style("success") + " QPushButton { font-size: 16px; padding: 12px; }")
             self.smooth_motion_timer.stop()
             self.current_active_action = "Ignore"
+            self.move_action_start_time = None
+            self._moving_move_active = False
+            self.mouse_click_active = False
+            self.click_hold_since = None
+            self.click_fired_once = False
+            self.scroll_accum = 0.0
 
     def on_batch_received(self, payload):
         if self.data_buffer is None:
@@ -2042,7 +2128,8 @@ class MouseControllerApp(QMainWindow):
 
         # Update UI text
         self.lbl_prediction.setText(vote_label.upper())
-        self.lbl_conf.setText(f"Conf: {conf_pct:.1f}%")
+        speed_text = f"  |  Speed: {self.effective_speed:.0f} px/s" if self.mouse_control_active else ""
+        self.lbl_conf.setText(f"Conf: {conf_pct:.1f}%{speed_text}")
         
         if conf_pct < req_conf or self.class_action_map.get(vote_label) == "Ignore":
             self.lbl_prediction.setStyleSheet("color: #6F8A99;")
@@ -2053,14 +2140,23 @@ class MouseControllerApp(QMainWindow):
         action = self.class_action_map.get(vote_label, "Ignore")
         self.current_active_action = action
         self.current_active_conf = conf_pct
+        # [ADAPTIVE] Smooth confidence so the analog speed gear changes
+        # gradually instead of snapping between fast and slow.
+        self.smoothed_conf = self.smoothed_conf * 0.5 + conf_pct * 0.5
 
-        # Process Discrete Mouse Clicks on gesture activation (rising edge trigger)
-        if self.mouse_control_active and "Click" in action:
-            if action != self.last_clicked_action:
-                self.execute_mouse_click(action)
-                self.last_clicked_action = action
+        # [ADAPTIVE] Arm/disarm a click candidate. The actual click is fired
+        # from the 120 Hz motion timer only after the gesture has been held
+        # for spin_click_hold seconds, so flickering predictions cannot cause
+        # spurious clicks and a single activation produces a single click.
+        is_click = "Click" in action
+        if self.mouse_control_active and is_click:
+            if not self.mouse_click_active and not self.click_fired_once:
+                self.mouse_click_active = True
+                self.click_hold_since = None
         else:
-            self.last_clicked_action = ""
+            self.mouse_click_active = False
+            self.click_hold_since = None
+            self.click_fired_once = False
 
     def execute_mouse_click(self, action):
         now = time.time()
@@ -2114,35 +2210,94 @@ class MouseControllerApp(QMainWindow):
         action = self.current_active_action
         base_speed = float(self.spin_speed.value())
 
-        # Scale speed by confidence: a weak/uncertain gesture moves slower, so
-        # direction flips while confidence is low feel less violent.
+        # Confidence gear: a weak/uncertain gesture moves slower, so direction
+        # flips while confidence is low feel less violent. The gain now maps
+        # the smoothed confidence continuously and monotonically.
         req_conf = self.spin_conf.value()
-        if self.current_active_conf > req_conf:
-            gain = 0.5 + 0.5 * min(1.0, (self.current_active_conf - req_conf) / max(1.0, 100.0 - req_conf))
+        if req_conf >= 99.0:
+            confidence_gain = 1.0
         else:
-            gain = 1.0
-        base_speed *= gain
+            loc_conf = min(max(self.smoothed_conf, req_conf), 100.0)
+            confidence_gain = 0.70 + 0.30 * ((loc_conf - req_conf) / max(1.0, 99.0 - req_conf))
+        confidence_gain = min(max(confidence_gain, 0.70), 1.0)
+
+        # Adaptive rate control: each newly-held direction gesture starts slow
+        # (precise entry into a target) and ramps toward full speed as it is
+        # held, so long movements stay fast while fine final corrections stay
+        # gentle. Restarting the ramp on every re-engagement keeps the last
+        # tiny adjustments slow, which reduces overshoot and re-entries.
+        is_move = action in MOVE_ACTIONS
+        if is_move:
+            if not self._moving_move_active:
+                self.move_action_start_time = now
+            self._moving_move_active = True
+        else:
+            self._moving_move_active = False
+            self.move_action_start_time = None
+        if is_move and self.chk_adaptive_rate.isChecked() and self.move_action_start_time is not None:
+            hold_time = max(0.0, now - self.move_action_start_time)
+            rate_gain = self.RATE_MIN_GAIN + (1.0 - self.RATE_MIN_GAIN) * (
+                1.0 - math.exp(-hold_time / self.RATE_RAMP_TAU)
+            )
+        else:
+            rate_gain = 1.0
+
+        effective_speed = min(max(base_speed * confidence_gain * rate_gain, 5.0), 4000.0)
+        self.effective_speed = effective_speed
 
         # Determine target velocity. Diagonal actions keep the same total
         # speed by scaling each axis by 1/sqrt(2).
         diagonal_scale = 0.7071
         target_vx, target_vy = 0.0, 0.0
         if action == "Move Up":
-            target_vy = -base_speed
+            target_vy = -effective_speed
         elif action == "Move Down":
-            target_vy = base_speed
+            target_vy = effective_speed
         elif action == "Move Left":
-            target_vx = -base_speed
+            target_vx = -effective_speed
         elif action == "Move Right":
-            target_vx = base_speed
+            target_vx = effective_speed
         elif action == "Move Up-Left":
-            target_vx, target_vy = -base_speed * diagonal_scale, -base_speed * diagonal_scale
+            target_vx, target_vy = -effective_speed * diagonal_scale, -effective_speed * diagonal_scale
         elif action == "Move Up-Right":
-            target_vx, target_vy = base_speed * diagonal_scale, -base_speed * diagonal_scale
+            target_vx, target_vy = effective_speed * diagonal_scale, -effective_speed * diagonal_scale
         elif action == "Move Down-Left":
-            target_vx, target_vy = -base_speed * diagonal_scale, base_speed * diagonal_scale
+            target_vx, target_vy = -effective_speed * diagonal_scale, effective_speed * diagonal_scale
         elif action == "Move Down-Right":
-            target_vx, target_vy = base_speed * diagonal_scale, base_speed * diagonal_scale
+            target_vx, target_vy = effective_speed * diagonal_scale, effective_speed * diagonal_scale
+        elif action == "Scroll Up":
+            self.scroll_accum += self.spin_scroll_speed.value() * elapsed_s
+            if self.scroll_accum >= 1.0:
+                ticks = int(self.scroll_accum)
+                self.scroll_accum -= ticks
+                try:
+                    self.mouse_backend.scroll(1, ticks)
+                except Exception:
+                    pass
+        elif action == "Scroll Down":
+            self.scroll_accum += self.spin_scroll_speed.value() * elapsed_s
+            if self.scroll_accum >= 1.0:
+                ticks = int(self.scroll_accum)
+                self.scroll_accum -= ticks
+                try:
+                    self.mouse_backend.scroll(-1, ticks)
+                except Exception:
+                    pass
+        else:
+            self.scroll_accum = 0.0
+
+        # Click debounce: a click candidate armed by on_prediction_ready only
+        # fires once it has been sustained for the configured hold time, and
+        # only once per activation (until the gesture returns to a non-click
+        # action).
+        if self.mouse_click_active and "Click" in action:
+            if self.click_hold_since is None:
+                self.click_hold_since = now
+            elif now - self.click_hold_since >= self.spin_click_hold.value():
+                self.execute_mouse_click(action)
+                self.mouse_click_active = False
+                self.click_hold_since = None
+                self.click_fired_once = True
 
         # Exponential velocity interpolation. Accelerate gently; decelerate or
         # reverse quickly so stopping tracks the gesture without overshoot.
